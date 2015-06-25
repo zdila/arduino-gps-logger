@@ -1,13 +1,16 @@
+#include <SPI.h>
+
 //#include <AltSoftSerial.h>
-#include <SD.h>
+// #include <SD.h>
+#include <SdFat.h>
 #include <TinyGPS++.h>
 //#include <SoftwareSerial.h>
 
 #undef DEBUG
 
 #ifdef DEBUG
-#define LOG(str) Serial.println(str)
-#define LOGW(str) Serial.write(str)
+#define LOG(str) (str) // Serial.println(str)
+#define LOGW(str) (str) // Serial.write(str)
 #else
 #define LOG(str)
 #define LOGW(str)
@@ -30,6 +33,8 @@ int cmd = 0;
 unsigned short sats = 0;
 float hdop = 10000;
 
+SdFat SD;
+
 void getNewFilename(char* buf, int size) {
   int i = 0;
   do {
@@ -41,20 +46,31 @@ void getNewFilename(char* buf, int size) {
 }
 
 char *configs[] = {
-  "$PUBX,40,GSV,0,0,0,0*59",
-  "$PUBX,40,GLL,0,0,0,0*5C"
-  "$PMTK301,2*2E", // WAAS
-  "$PMTK313,1*2E", // enable SBAS
-//  "$PMTK220,250*29", // 4Hz
-  "$PMTK220,1000*1F", // 1Hz
-  "$PMTK314,0,1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29", // RMC, GSA, GGA
-  "$PMTK397,0*23", // no speed threshold
+  // only RMC and GGA are supported by TinyGPS++
+  
+//  "$PUBX,41,1,0007,0003,38400,0*20\r\n",
+  "$PUBX,40,GSV,0,0,0,0,0,0*59\r\n", // disable GSV
+  "$PUBX,40,GLL,0,0,0,0,0,0*5C\r\n" // disable GLL
+  "$PUBX,40,VTG,0,0,0,0,0,0*5E\r\n" // disable VTG
+  "$PUBX,40,GSA,0,0,0,0,0,0*4E\r\n" // disable GSA
+  
+  
+//  "$PMTK301,2*2E", // WAAS
+//  "$PMTK313,1*2E", // enable SBAS
+////  "$PMTK220,250*29", // 4Hz
+//  "$PMTK220,1000*1F", // 1Hz
+//  "$PMTK314,0,1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29", // RMC, GSA, GGA
+//  "$PMTK397,0*23", // no speed threshold
 };
 
 void setup() {
   // pinMode(6, INPUT); // button for changing baud rates
   pinMode(4, OUTPUT); // LED
 //  digitalWrite(4, HIGH);
+
+  pinMode(2, OUTPUT); // SPKR
+  tone(2, 1055, 200);
+
 
   Serial.begin(9600);
     
@@ -76,12 +92,20 @@ void setup() {
   // Serial.print("$PMTK104*37\r\n"); // reset
 
 
-  cardOk = SD.begin(10);
+  cardOk = SD.begin(10); // , SPI_HALF_SPEED
   if (!cardOk) {
     LOG("Card failed, or not present");
+    
+    for (;;) {
+      tone(2, 2109, 100);
+      delay(900);
+    }
+    
     return;
   }
   
+  tone(2, 1580, 200);
+
   LOG("card initialized.");
 }
 
@@ -121,8 +145,9 @@ void loop() {
     
     if (dataFile && !off) {
       dataFile.write(c);
+    
       //we are ok to lost some data, but save write power
-      if (c == '\n' && m - time > 5000) {
+      if (c == '\n' && m - time > 30000) {
         time = m;
 
 //        char buf[20];
@@ -130,13 +155,21 @@ void loop() {
 //        dataFile.write(buf);
 //        dataFile.write('\n');
 
-        dataFile.flush();
+//        dataFile.println(readVcc(), DEC);
+//        dataFile.flush();
+        
+        if (!dataFile.sync() || dataFile.getWriteError()) {
+          tone(2, 2109, 200);
+        }
       }
     }
     
     if (cmd < sizeof(configs)) {
       if (m > 2000 + cmd * 500) {
-        Serial.println(configs[cmd++]);
+        Serial.print(configs[cmd++]);
+        if (cmd == 1) {
+          //Serial.begin(38400);
+        }
       }
     } else { // if all configured
       gps.encode(c);
@@ -148,20 +181,13 @@ void loop() {
         day = gps.date.day();
         month = gps.date.month();
         year = gps.date.year();
-        if (year == 2081) { // happens for SKM53
+        if (year > 2030 || year < 2010) {
           year = 0;
         } else {
           openDataFile();
+          tone(2, 1580, 500);
         }
-        
-//        if (dataFile) {
-//            dataFile.print("XXX ");
-//            dataFile.print(day);
-//            dataFile.print(" YYY ");
-//            dataFile.print(year);
-//            dataFile.println(" ZZZ");
-//        }
-
+       
       }
   
       if (gps.satellites.isUpdated()) {
@@ -182,13 +208,7 @@ void loop() {
 
   // hdop
   digitalWrite(4, !cardOk || (millis() % 100 > 50 && (millis() / 100) % 50 < (hdop / 100.0 - 0.95) * 10));
-
-//  if (Serial.available()) {
-//    char c = Serial.read();
-//    Serial.write(c);
-//    mySerial.write(c);
-//  }
-  
+ 
 }
 
 byte getUbxAck(byte *msgID) {
@@ -243,4 +263,17 @@ void dateTime(uint16_t* date, uint16_t* time) {
 
   // return time using FAT_TIME macro to format fields
   *time = FAT_TIME(hour, minute, second);
+}
+
+long readVcc() {
+  long result;
+  // Read 1.1V reference against AVcc
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Convert
+  while (bit_is_set(ADCSRA,ADSC));
+  result = ADCL;
+  result |= ADCH<<8;
+  result = 1126400L / result; // Back-calculate AVcc in mV
+  return result;
 }
